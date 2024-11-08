@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
-
+from dotenv import load_dotenv
 import responses
 import sheets
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 Text_ChannelID = 1268216583889621179

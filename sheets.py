@@ -3,6 +3,7 @@ import os.path
 import re
 import time
 
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
@@ -15,6 +16,8 @@ import bot
 global checkpick
 global leftcheckpick
 global prevlist
+
+load_dotenv()
 
 prevlist = []
 checkpick = []
