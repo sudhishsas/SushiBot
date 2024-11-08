@@ -21,7 +21,7 @@ checkpick = []
 leftcheckpick = []
 
 def getspredsheetid():
-    auth_str = os.environ.get('SAMPLE_SPREADSHEET_ID')
+    auth_str = os.getenv('SAMPLE_SPREADSHEET_ID')
 
     # Check if the environment variable is set
     if auth_str:
@@ -34,7 +34,7 @@ def getspredsheetid():
         print("SPREAD_SHEET_ID environment variable is not set.")
 
 def getuserrange():
-    auth_str = os.environ.get('SPREAD_SHEET_RANGES')
+    auth_str = os.getenv('SPREAD_SHEET_RANGES')
 
     # Check if the environment variable is set
     if auth_str:
@@ -48,7 +48,7 @@ def getuserrange():
 
 # If modifying these scopes, delete the file token.json.
 #SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-SCOPES = os.environ.get('SCOPES')
+SCOPES = os.getenv('SCOPES')
 
 # The ID and range of a sample spreadsheet.
 SPREADSHEET_ID_dct = getspredsheetid()
@@ -510,7 +510,7 @@ def firstfilled(column, sheet, SPREADSHEET_ID):
 
 
 def getguild():
-    guilds_auth_str = os.environ.get('GUILDS_AUTH')
+    guilds_auth_str = os.getenv('GUILDS_AUTH')
 
     # Check if the environment variable is set
     if guilds_auth_str:
@@ -526,7 +526,7 @@ def getguild():
 
 
 def getauthusers():
-    auth_str = os.environ.get('Auth_MEMBER')
+    auth_str = os.getenv('Auth_MEMBER')
 
     # Check if the environment variable is set
     if auth_str:

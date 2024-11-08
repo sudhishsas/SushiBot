@@ -13,9 +13,9 @@ from discord.ext import commands
 import responses
 import sheets
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 Text_ChannelID = 1268216583889621179
-AUTH_USERS = os.environ.get('SAMPLE_SPREADSHEET_ID')
+AUTH_USERS = os.getenv('SAMPLE_SPREADSHEET_ID')
 
 # Enable intents
 intents = discord.Intents.default()
@@ -107,13 +107,14 @@ def run_bot():
 
         print(f"message {user_message} from {username} in channel {channel}. Author ID is {message.author.id} and channel id is {message.channel.id}")
 
-        if user_message[0] == '*':
-            user_message = user_message[1:]
-
+        # Check if the message is not empty before accessing the first character
+        if user_message and user_message[0] == '*':
+            
             await send_message(message, user_message, is_private=True)
 
-        elif user_message[0] == '!':
 
+        elif user_message and user_message[0] == '*':
+            
             await send_message(message, user_message, is_private=False)
 
         await bot.process_commands(message) # Makes sure the bot will process commands other than chat commands. 
