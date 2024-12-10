@@ -6,7 +6,10 @@ import re
 import time
 import traceback
 from asyncio import create_task
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from weakref import \
+    WeakValueDictionary  # to allow automatic garbage collection of unused objects.
 
 import aiosqlite
 import discord
@@ -31,7 +34,7 @@ intents.guild_messages = True
 intents.guild_typing = True
 intents.message_content = True
 
-# Define your bot's prefix and pass in the intents 
+# Define your bot's prefix and pass in the intents
 bot = commands.Bot(command_prefix="%", intents=intents)
 
 # Dictionary to store locks for specific users in specific sheets used for sign up sheet function
@@ -64,6 +67,7 @@ AUTH_TRACKERS = sheets.getauthusers()
 # global trackerid
 global curauthor
 periodic_task = None
+when_process = []
 # global trackedlist
 # global nick_track
 # global keep_running
@@ -179,9 +183,7 @@ channel_update_lock = asyncio.Lock()
 # Interval for periodic updates (in seconds)
 interval = 60
 
-
 # method for determinign to send a private message or a message in the channel being requested form
-
 async def send_message(message, user_message, is_private):
     try:
         response = responses.handle_response(message)
@@ -193,13 +195,9 @@ async def send_message(message, user_message, is_private):
     except Exception as e:
         print(f"Exception error:{print(traceback.format_exc())} {e}")
 
-
 def run_bot():
-
     bot.run(BOT_TOKEN)
     
-
-
 @bot.event
 async def on_ready():
     # Run the setup database coroutine
@@ -253,9 +251,9 @@ async def on_message(message):
 #
 #   user_join_timedate = {member1_id: time/date, member2_id: time/date, member3_id: time/date, member4_id: time/date}
 
-
 @bot.event
 async def on_voice_state_update(member, before, after):
+    global when_process
 
     # Taking the current time in the UTC time
     current_time = get_date_time()
@@ -266,9 +264,40 @@ async def on_voice_state_update(member, before, after):
     if tracker and tracker.tracked and tracker.checkchannel:
 
         # Exit early if already processing to prevent interference
-        # if tracker.processing:
-        #     return
+        if tracker.processing:
+            when_process.append((member, after, before))
+            return
+        if len(when_process) != 0 :
+            for member, after, before in when_process:
+                # Update last_event_time for debounce handling
+                tracker.last_event_time = time.time()
+                await VCchekingtracker(member, before, after, current_time)
+
+                print("in tracked check", tracker.tracked)
+                async with tracker.member_status_lock:
+                    # Check if a user joined a voice channel
+                    if before.channel is None and after.channel is not None and str(after.channel.name) == str(tracker.checkchannel):
+                        print("joined channel")
+                        # Add or update to the dictionary with join state (1)
+                        tracker.member_status[member] = (1, (after, before))
+                    # Check if a user left a voice channel
+                    elif before.channel is not None and after.channel is None and str(before.channel.name) == str(tracker.checkchannel):
+                        print("left channel")
+                        # Add or update to the dictionary with leave state (0)
+                        tracker.member_status[member] = (0, (after, before))
+                    # Check if the user switched voice channels
+                    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id and (str(before.channel.name) == str(tracker.checkchannel) or str(after.channel.name) == str(tracker.checkchannel)):
+                        # Consider the user both leaving the previous channel and joining the new one
+                        print("switched channel")
+                        if before.channel == tracker.checkchannel:
+                            print("switched left")
+                            tracker.member_status[member] = (0, (after, before))
+                        elif after.channel == tracker.checkchannel:
+                            print("sitched joined")
+                            tracker.member_status[member] = (1, (after, before))
+            when_process.clear() # clear the list after updating the statuses in order to capture more missed leave/join events when processing is happening
         
+
         # Update last_event_time for debounce handling
         tracker.last_event_time = time.time()
         await VCchekingtracker(member, before, after, current_time)
@@ -305,10 +334,6 @@ async def on_voice_state_update(member, before, after):
         # trigger for processing events
         await debounce_process()  # Debounced trigger to process_joins_and_leaves
         # Start processing the buffer after a short delay
-        # if len(member_status) > 0:
-        #     print("member ststas size", member_status, len(member_status))
-        #     await process_joins_and_leaves()
-
 
 async def process_joins_and_leaves():
     
@@ -392,7 +417,7 @@ def get_channel(check, to_process):
 async def periodic_update(interval): # shoul only be ran when the track me function is called
 
     """
-    Runs the updatepicklist function every `interval` seconds. 
+    Runs the updatepicklist function every `interval` seconds.
     """
     firstiter = True
 
@@ -421,9 +446,6 @@ async def periodic_update(interval): # shoul only be ran when the track me funct
                                 
                                 # Update the last call time to reset the rate limit timer
                                 tracker.update_last_call_time()
-                                
-                
-
                 # Update pro_time to the current time after the update to reset the timer
                 tracker.pro_time = time.time()
         else:
@@ -438,7 +460,6 @@ def stop_task():
 async def updatesheet(members, todo, member_ids, memname):
     # Run the blocking function in a background thread
     await updatesheet_sync( members, todo, member_ids, memname)
-
 
 # updates the sheet with the assigned call (add to or remove).
 async def updatesheet_sync(members, todo, member_ids, memname):
@@ -487,9 +508,7 @@ async def updatesheet_sync(members, todo, member_ids, memname):
                         
                         # Update the last call time to reset the rate limit timer
                         tracker.update_last_call_time()
-                
     else:
-        
         # Extract keys (names) from the dictionary to create a set
         res = set(memname.keys())
 
@@ -648,7 +667,7 @@ async def find_user_voice(ctx, user_name: str):
                     # asyncio.create_task(periodic_update(interval))
                     tracker.tracked = True
                     members_in_vc = {(member.nick  if member.nick is not None else member.name): member.id for member in channel.members } # gets members in the tracked vc.
-                    tracker.curtracker = tracker.members_dict[int(user_namec)]
+                    tracker.curtracker = member.name #tracker.members_dict[int(user_namec)]
                     async with channel_update_lock:
                         await get_members_in_channel(tracker.checkchannel, members_in_vc)
                     break  # Stop searching after finding the user
@@ -676,17 +695,17 @@ async def checkVCs(curvoice_channels):
     channel = curvoice_channels
     members = channel.members
     for member in members:
-        
-        if channel.id not in tracker.voice_channels:
-            tracker.voice_channels[channel.id] = channel.name
+        # only use to track members in voic channel and voice channels
+        # if channel.id not in tracker.voice_channels:
+        #     tracker.voice_channels[channel.id] = channel.name
 
-        if channel.id not in tracker.voice_channel_users:
-            tracker.voice_channel_users[channel.id] = []
+        # if channel.id not in tracker.voice_channel_users:
+        #     tracker.voice_channel_users[channel.id] = []
 
-        if member.id not in tracker.voice_channel_users[channel.id]:
-            if member.id not in tracker.members_dict:
-                tracker.members_dict[member.id] = member.name
-            tracker.voice_channel_users[channel.id].append(member.id)
+        # if member.id not in tracker.voice_channel_users[channel.id]:
+        #     if member.id not in tracker.members_dict:
+        #         tracker.members_dict[member.id] = member.name
+        #     tracker.voice_channel_users[channel.id].append(member.id)
         
         if member.id not in tracker.user_joined_timedate and str(channel.name) == str(tracker.checkchannel):
             
@@ -702,17 +721,18 @@ async def VCchekingtracker(member, before, after, current_time):
         # Check if the user joined a voice channel
         if before.channel is None and after.channel is not None:
             channel = after.channel
-            if channel.id not in tracker.voice_channels:
-                tracker.voice_channels[channel.id] = channel.name
-            if channel.id not in tracker.voice_channel_users:
-                tracker.voice_channel_users[channel.id] = []
-            if member.id not in tracker.voice_channel_users[channel.id]:
-                if member.id not in tracker.members_dict:
-                    tracker.members_dict[member.id] = member.name
-                tracker.voice_channel_users[channel.id].append(member.id)
-                print(f"{member.name} joined {channel.name} at {current_time}")
+            # only use to track members in voic channel and voice channels
+            # if channel.id not in tracker.voice_channels:
+            #     tracker.voice_channels[channel.id] = channel.name
+            # if channel.id not in tracker.voice_channel_users:
+            #     tracker.voice_channel_users[channel.id] = []
+            # if member.id not in tracker.voice_channel_users[channel.id]:
+            #     if member.id not in tracker.members_dict:
+            #         tracker.members_dict[member.id] = member.name
+            #     tracker.voice_channel_users[channel.id].append(member.id)
+            #     print(f"{member.name} joined {channel.name} at {current_time}")
             # updating the VC logs
-            
+            print(f"{member.name} joined {channel.name} at {current_time}")
             if member.id not in tracker.user_joined_timedate and str(channel.name) == str(tracker.checkchannel):
                 tracker.user_joined_timedate[member.id]= current_time
             if member.id in tracker.user_joined_timedate and str(channel.name) == str(tracker.checkchannel):
@@ -721,11 +741,13 @@ async def VCchekingtracker(member, before, after, current_time):
         # Check if the user left a voice channel
         elif before.channel is not None and after.channel is None:
             channel = before.channel
-            if channel.id in tracker.voice_channel_users:
-                if member.id in tracker.voice_channel_users[channel.id]:
-                    tracker.voice_channel_users[channel.id].remove(member.id)
-                    print(f"{member.name} left {channel.name} at {current_time}")
-                    
+            # only use to track members in voic channel and voice channels
+            # if channel.id in tracker.voice_channel_users:
+            #     if member.id in tracker.voice_channel_users[channel.id]:
+            #         tracker.voice_channel_users[channel.id].remove(member.id)
+            #         print(f"{member.name} left {channel.name} at {current_time}")
+            
+            print(f"{member.name} left {channel.name} at {current_time}")
             if member.id not in tracker.user_left_timedate and str(channel.name) == str(tracker.checkchannel):
                 tracker.user_left_timedate[member.id]= current_time
             if member.id in tracker.user_left_timedate and str(channel.name) == str(tracker.checkchannel):
@@ -734,29 +756,32 @@ async def VCchekingtracker(member, before, after, current_time):
         # Check if the user switched voice channels
         elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
             # User left the previous channel
-            if before.channel.id in tracker.voice_channel_users:
-                if member.id in tracker.voice_channel_users[before.channel.id]:
-                    tracker.voice_channel_users[before.channel.id].remove(member.id)
-                    print(f"{member.name} left {before.channel.name} at {current_time}")
+            # only use to track members in voic channel and voice channels
+            # if before.channel.id in tracker.voice_channel_users:
+            #     if member.id in tracker.voice_channel_users[before.channel.id]:
+            #         tracker.voice_channel_users[before.channel.id].remove(member.id)
+            #         print(f"{member.name} left {before.channel.name} at {current_time}")
+            
+            print(f"{member.name} left {before.channel.name} at {current_time}")
             channel = before.channel
             if member.id not in tracker.user_left_timedate and str(channel.name) == str(tracker.checkchannel):
                 tracker.user_left_timedate[member.id]= current_time
             if member.id in tracker.user_left_timedate and str(channel.name) == str(tracker.checkchannel):
                 tracker.user_left_timedate[member.id]= current_time
- 
             # User joined the new channel
-            
-            if after.channel.id not in tracker.voice_channel_users:
-                tracker.voice_channel_users[after.channel.id] = []
+            # only use to track members in voic channel and voice channels
+            # if after.channel.id not in tracker.voice_channel_users:
+            #     tracker.voice_channel_users[after.channel.id] = []
 
-            if member.id not in tracker.voice_channel_users[after.channel.id]:
-                tracker.voice_channel_users[after.channel.id].append(member.id)
-                print(f"{member.name} joined {after.channel.name} at {current_time}")
+            # if member.id not in tracker.voice_channel_users[after.channel.id]:
+            #     tracker.voice_channel_users[after.channel.id].append(member.id)
+            #     print(f"{member.name} joined {after.channel.name} at {current_time}")
 
-            if after.channel.id not in tracker.voice_channels:
-                    tracker.voice_channels[after.channel.id] = after.channel.name
-            if member.id not in tracker.members_dict:
-                tracker.members_dict[member.id] = member.name
+            print(f"{member.name} joined {after.channel.name} at {current_time}")
+            # if after.channel.id not in tracker.voice_channels:
+            #         tracker.voice_channels[after.channel.id] = after.channel.name
+            # if member.id not in tracker.members_dict:
+            #     tracker.members_dict[member.id] = member.name
 
             channel = after.channel
             if member.id not in tracker.user_joined_timedate and str(channel.name) == str(tracker.checkchannel):
@@ -869,7 +894,6 @@ def member_auth():
             return False
     return commands.check(predicate)
 
-
 @bot.event
 async def on_command_error(ctx, error):
     """Handles errors for commands, including unknown commands."""
@@ -882,7 +906,6 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(f"Error: Missing required argument. Check the command usage.")
     # Handle any other command error
-    
 
 @bot.command(name="getguildname")
 async def find_guild_name(ctx):
@@ -903,7 +926,7 @@ def shutdown():
     print("Shutting down...")
     bot.close()
 
-
+# Coin flip command takes ('%flip' outcome) outcome = [heads, tails]
 @bot.command(name="flip")
 async def coinflip(ctx, guess: str):
     """Flips a coin and checks if the user's guess is correct."""
@@ -920,14 +943,14 @@ async def coinflip(ctx, guess: str):
         await ctx.send(f"😢 You lost. The coin landed on **{flip_result}**.")
 
 
-#creating Select options for sign up sheet
+# Creating Select options for sign up sheet
 # All roles needed :
 #       Tanks: Golem, HOJ, Soul Scyte, Heavy Mace, Grailseeker, 1h Arcane, 1h Mace, Incubus, Icicle
 #       Heals: Hallow Fall, Fallen
 #       Support: Bedrock, Locus, Occult, Great Arcane, Oathkeeper, Rootbound
 #       battlemount: Charriot, Basilisk, Eagle, Behemouth, Bastion, Balista, Ent
 #       DPS: Realmbreaker, Lifecurse, Damnation, Permafrost, Spiked, Rift Glave, Dawnsong, Carving, Hellfire, Spirithunter
-
+# find a way to transilate the message in real time.
 
 # Ensure the database and table are created
 async def setup_database():
@@ -999,7 +1022,7 @@ class SubroleDropdownView(discord.ui.View):
         )
         self.task = None
         self.membernick = member
-        self.followup_message = None  # Initialize the followup_message attribute
+        self.followup_messages = {}  # Store followup messages for each user
 
         if self.target_time <= datetime.now(timezone.utc):
             self.target_time += timedelta(days=1)  # Move to next day if time has passed
@@ -1064,17 +1087,18 @@ class SubroleDropdownView(discord.ui.View):
                     break
 
     async def send_or_edit_followup(self, interaction: discord.Interaction, content: str):
-        if self.followup_message:
+        user_id = interaction.user.id  # Get the user ID to track messages uniquely
+        
+        if user_id in self.followup_messages:
+            # If the follow-up message for this user already exists, try to edit it
             try:
-                # Edit the existing follow-up message
-                await self.followup_message.edit(content=content)
-                
+                await self.followup_messages[user_id].edit(content=content)
             except discord.NotFound:
                 # If the message no longer exists, send a new one
-                self.followup_message = await interaction.followup.send(content=content, ephemeral=True,)
+                self.followup_messages[user_id] = await interaction.followup.send(content=content, ephemeral=True)
         else:
-            # Send a new follow-up message
-            self.followup_message = await interaction.followup.send(content=content,ephemeral=True,)
+            # Send a new follow-up message if none exists
+            self.followup_messages[user_id] = await interaction.followup.send(content=content, ephemeral=True)
 
     def clone_embed(self, embed, time_str):
         """Helper function to clone an embed and modify the footer with the time remaining."""
@@ -1481,7 +1505,7 @@ def member_auth():
     return commands.check(predicate)
 
 # Command to send the dropdown menu
-@bot.command(name='menu')
+@bot.command(name='start_signupsheet')
 @member_auth()
 async def signup(ctx):
     
