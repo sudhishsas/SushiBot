@@ -33,3 +33,19 @@ Open the Google Sheet you want the service account to access.
 Click on the Share button.
 Share the sheet with the service account's email address (it will look something like your-service-account-name@your-project-id.iam.gserviceaccount.com).
 Make sure to give it sufficient permissions (Viewer, Editor, etc.).
+
+Remember to always create a virtual environment and install the packages in your requirements file
+
+```bash
+$ python -m venv venv (you may need to use python3 instead)
+$ source venv/bin/activate (or .\venv\Scripts\activate on Windows)
+$ pip install -r requirements.txt 
+$ python main.py
+$ pip install flask
+$ 
+
+# to start your viertual environment and run the flask app:
+$ py3 -m venv venv
+$ ".\venv\Scripts\activate" "(for windows)"
+$ "source venv/bin/activate" "(other than windows)"
+$ py main.py

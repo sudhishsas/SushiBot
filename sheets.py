@@ -3,6 +3,8 @@ import os.path
 import re
 import time
 
+import aiosqlite
+import gspread
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
@@ -32,6 +34,7 @@ def getspredsheetid():
         spreadid = json.loads(auth_str)
 
         # Print the dictionary (optional)
+        #print("see the dict", spreadid)
         return spreadid
     else:
         print("SPREAD_SHEET_ID environment variable is not set.")
@@ -49,6 +52,20 @@ def getuserrange():
     else:
         print("SPREAD_SHEET_RANGES environment variable is not set.")
 
+
+def getuserrangesignup():
+    auth_str = os.getenv('SPREAD_SHEET_RANGES_SIGNUP')
+
+    # Check if the environment variable is set
+    if auth_str:
+        # Parse the JSON string into a dictionary
+        auth_ranges = json.loads(auth_str)
+
+        # Print the dictionary (optional)
+        return auth_ranges
+    else:
+        print("SPREAD_SHEET_RANGES_SIGNUP environment variable is not set.")
+
 # If modifying these scopes, delete the file token.json.
 #SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 SCOPES = os.getenv('SCOPES')
@@ -57,6 +74,7 @@ SCOPES = os.getenv('SCOPES')
 SPREADSHEET_ID_dct = getspredsheetid()
 SPREADSHEET_RANGES = getuserrange()
 SERVICE_ACCOUNT_FILE = r'servicefile.json'
+SPREAD_SHEET_RANGES_SIGNUP_dct = getuserrangesignup()
 
 
 def get_sheets_service(SERVICE_ACCOUNT_FILE):
@@ -65,7 +83,6 @@ def get_sheets_service(SERVICE_ACCOUNT_FILE):
 
 
 # Used for authentication with out service account, do not recommended to use this approach. only used for testing
-
 def get_google_sheets_token():
 
     # The file token.json stores the user's access and refresh tokens, and is
@@ -192,7 +209,7 @@ def updatepicklist(members_list, tracker, todo, leftmem):
             
             for member in members_set:
                 if member not in column_data and member not in checkpick_set:
-                    #they are checked becaus they are in the vc but not on the list
+                    #they are checked because they are in the vc but not on the list
                     checkpick_set.add(member)
 
 
@@ -263,6 +280,7 @@ def addtosheet(members_name, tracker):
             existing_values = current_values.get('values', [])
             existingtimevalues = currenttime_values.get('values', [])
 
+
             # (NAMES) Find the first empty row (row after the last filled cell)
             first_empty_row = len(existing_values) + 1  # Next empty row is after the last filled row
             SAMPLE_RANGE_NAME = f"{column}{first_empty_row}:{column}{first_empty_row+len(names)-1}"
@@ -292,7 +310,6 @@ def addtosheet(members_name, tracker):
         print("error happened",err)
 
 
-
 def getstartpos(column, remaining_items, existing_values):
 
     SAMPLE_RANGE_NAME = None
@@ -307,9 +324,6 @@ def getstartpos(column, remaining_items, existing_values):
         SAMPLE_RANGE_NAME = f"{column}{first_filled_row}:{column}{first_filled_row+len(remaining_items)-1}"
     
     return SAMPLE_RANGE_NAME
-
-
-
 
 
 def remove_and_update_items(remove_list, left_list, tracker):
@@ -443,6 +457,122 @@ def remove_and_update_items(remove_list, left_list, tracker):
         print(f"An error occurred: {e}")
 
 
+def signup_sheet(author, sheet_id, values):
+
+    """
+    Transfers data from the database to a Google Sheet, adds interactive checkboxes for user checking, 
+    and clears relevant database entries.
+    """
+    # Ensure that the author has defined ranges
+    SPREADSHEET_ID = SPREADSHEET_ID_dct[author]
+
+    try:
+        with get_sheets_service(SERVICE_ACCOUNT_FILE) as service:
+            sheet = service.spreadsheets()
+            
+            # Define column ranges from signup sheet settings
+            start_row = SPREAD_SHEET_RANGES_SIGNUP_dct[author]["startrow"]
+            checklist_range = SPREAD_SHEET_RANGES_SIGNUP_dct[author]["checklist"]
+            name_range = SPREAD_SHEET_RANGES_SIGNUP_dct[author]["Names"]
+            role_ranges = [
+                SPREAD_SHEET_RANGES_SIGNUP_dct[author]["ROLE1"],
+                SPREAD_SHEET_RANGES_SIGNUP_dct[author]["ROLE2"],
+                SPREAD_SHEET_RANGES_SIGNUP_dct[author]["ROLE3"],
+                SPREAD_SHEET_RANGES_SIGNUP_dct[author]["ROLE4"],
+            ]
+
+            # Clear existing rows in the relevant ranges
+            clear_rows_from_range(sheet, author, SPREADSHEET_ID)
+            
+            # Add the checkboxes and data to the Google Sheet
+            range_to_update = f"{checklist_range[0]}{start_row}:{role_ranges[-1]}"
+            body = {
+                "values": values
+            }
+            sheet.values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=range_to_update,
+                valueInputOption="USER_ENTERED",
+                body=body
+            ).execute()
+
+            # Add checkboxes to the checklist column]
+            check_range = (checklist_range[0], int(start_row))
+            add_checkboxes(0, values, SPREADSHEET_ID, check_range, sheet)
+
+            print(f"Successfully added signup sheet data to sheet: {sheet_id}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    
+def add_checkboxes(sheet_id, values, SPREADSHEET_ID, checklist_range, sheet):
+
+    try:
+        # Convert the column letter to zero-based index
+        column_index = ord(checklist_range[0].upper()) - ord('A')  # Convert column letter (e.g., "A") to index
+        start_row_index = checklist_range[1] - 1  # Convert 1-based row to 0-based index
+        end_row_index = start_row_index + len(values)  # Range ends at start_row_index + number of rows
+        
+        checkbox_request = {
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": start_row_index,
+                            "endRowIndex": end_row_index,
+                            "startColumnIndex": column_index,
+                            "endColumnIndex": column_index + 1,
+                        },
+                        "cell": {
+                            "dataValidation": {
+                                "condition": {
+                                    "type": "BOOLEAN",
+                                },
+                                "strict": True,
+                                "showCustomUi": True,
+                            },
+                            "userEnteredValue": {"boolValue": False},
+                        },
+                        "fields": "dataValidation,userEnteredValue",
+                    }
+                }
+            ]
+        }
+        
+        # Execute the batch update request
+        sheet.batchUpdate(spreadsheetId=SPREADSHEET_ID, body=checkbox_request).execute()
+        print(f"Checkboxes added successfully in range: {checklist_range}")
+
+    except Exception as e:
+        print(f"Failed to add checkboxes: {e}")
+
+def clear_rows_from_range(sheet, author, SPREADSHEET_ID):
+
+    #Clears all rows from a range of columns starting from a given row in a Google Sheet.
+
+
+    # Validate inputs
+    #if start_row < 1 or start_column < 1 or end_column < start_column:
+    #    raise ValueError("Invalid range: start_row must be >= 1, start_column must be >= 1, and end_column >= start_column.")
+
+    # Generate the range string
+    start_col_letter = SPREAD_SHEET_RANGES_SIGNUP_dct[author]["checklist"]
+    end_col_letter = SPREAD_SHEET_RANGES_SIGNUP_dct[author]["ROLE4"]
+    start_row = int(SPREAD_SHEET_RANGES_SIGNUP_dct[author]["startrow"])
+    range_to_clear = f"{start_col_letter}{start_row}:{end_col_letter}"
+
+    try:
+        # Clear the range using the Sheets API
+        sheet.values().clear(
+            spreadsheetId=SPREADSHEET_ID, 
+            range=range_to_clear
+        ).execute()
+
+        print(f"Successfully cleared rows from range: {range_to_clear}")
+    except Exception as e:
+        print(f"Failed to clear range {range_to_clear}. Error: {e}")
+
 # Clears all colums with data that was added form the traker fucntion from the sheet  starting from a speciic row
 
 def clear_columns(username):
@@ -488,6 +618,24 @@ def clear_columns(username):
         print(f"An error occurred: {e}")
 
 
+
+def last_filled(sheet, column_letter, SPREADSHEET_ID):
+    
+    #Finds the last non-empty cell in a specific column of a Google Sheet.
+    
+    
+    # Fetch the specified column's data
+    range_to_check = f"{column_letter}1:{column_letter}"  # Whole column
+    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_to_check).execute()
+    column_values = result.get('values', [])
+
+    # Find the last non-empty row by iterating in reverse
+    for row_num in range(len(column_values) - 1, -1, -1):
+        if column_values[row_num] and column_values[row_num][0].strip():  # Check if the cell is non-empty and non-whitespace
+            return row_num + 1  # Rows are 1-indexed in Google Sheets
+
+    return None  # Return None if the column is empty
+
 def firstfilled(column, sheet, SPREADSHEET_ID):
 
     # Fetch only the first few rows (e.g., first 100 rows, adjust as needed)
@@ -526,6 +674,7 @@ def getguild():
         print("GUILDS_AUTH environment variable is not set.")
     
     print(guildnames.keys())
+
 
 
 def getauthusers():
@@ -574,6 +723,32 @@ def sort_key(item):
     # Return a tuple to sort by tag first (if it exists), then by the rest of the name
     return (tag, sorted_components)
 
+def column_index_to_letter(index):
+    """Convert a 1-indexed column number to a column letter (e.g., 1 -> A, 27 -> AA)."""
+    letters = ""
+    while index > 0:
+        index -= 1
+        letters = chr(index % 26 + 65) + letters
+        index //= 26
+    return letters
 
 # if __name__ == "__main__":
-    
+#     values = [['', 'Aname', 'Great Arcane', 'Fill Battlemount', 'Hallow Fall', None], ['', '[CG] SushiPlz', 'Lifecurse', 'Golem', None, None]]  
+#     signup_sheet('445763286898573313', 2, values)
+#     print("DOne _a=s-da=")
+#     # with get_sheets_service(SERVICE_ACCOUNT_FILE) as service:
+
+#     #     sheet = service.spreadsheets()
+#     #     spreadsheet = sheet.get(spreadsheetId="1mdsWBR7ig5RkY_dX0j0CT_qxhLEU1RKvG-2dst6jSNc").execute()
+#     #     sheets = spreadsheet.get('sheets', [])
+#     #     for sheet in sheets:
+#     #         print(f"Sheet Name: {sheet['properties']['title']}, Sheet ID: {sheet['properties']['sheetId']}")
+#     author = str(445763286898573313)
+#     try:
+#         SPREADSHEET_ID = SPREADSHEET_ID_dct[author]
+#         SPREAD_SHEET_RANGES_SIGNUP = SPREAD_SHEET_RANGES_SIGNUP_dct[author]
+#         print("got the ids", SPREADSHEET_ID, SPREAD_SHEET_RANGES_SIGNUP, SPREAD_SHEET_RANGES_SIGNUP["checklist"])
+#     except KeyError as e:
+#         print(f"Error: Missing configuration for author {author}. KeyError: {e}")
+
+

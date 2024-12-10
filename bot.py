@@ -4,11 +4,14 @@ import os
 import random
 import re
 import time
+import traceback
 from asyncio import create_task
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import aiosqlite
 import discord
 from discord.ext import commands
+from discord.ui import *
 from dotenv import load_dotenv
 
 import responses
@@ -31,6 +34,9 @@ intents.message_content = True
 # Define your bot's prefix and pass in the intents 
 bot = commands.Bot(command_prefix="%", intents=intents)
 
+# Dictionary to store locks for specific users in specific sheets used for sign up sheet function
+locks = {}
+active_tasks={}
 
 # Dictionary to keep track of users in voice channels
 # voice_channel_users = {}
@@ -77,6 +83,23 @@ curauthor = None                           # name of the member that has started
 # debounce_timer = None                      # debounce time capture for voicestate processes to ensure no processes would over lap
 # pro_time = time.time()                     # time stamp capture for process_join_leave
 
+# Check if the guild is allowed
+async def is_guild_allowed(ctx):
+    #print(str(ctx.guild) and str(ctx.guild.id) in os.getenv('AUTH_SERVERS'), "see the guild in question",str(ctx.guild) , str(ctx.guild.id), os.getenv('AUTH_SERVERS') )
+    return str(ctx.guild) and str(ctx.guild.id) in os.getenv('AUTH_SERVERS')
+
+# Reminder : only uncomment if you want the bot to leave the servers you dont have added to the white list.
+# @bot.event
+# async def on_guild_join(guild):
+#     # Leave any guilds not in the whitelist
+#     if str(guild.id) not in os.getenv('AUTH_SERVERS'):
+#         await guild.leave()
+#         print(f"Left guild {guild.name} (ID: {guild.id})")
+
+@bot.check
+async def global_check(ctx):
+    # Prevent commands from running in disallowed guilds
+    return await is_guild_allowed(ctx)
 
 class Tracker:
     """
@@ -106,6 +129,8 @@ class Tracker:
         self.voice_channels = {}
         self.rate_limit_interval = 1  # Minimum interval between Google Sheets updates
         self.last_update_time = time.time() - self.rate_limit_interval  # Last time Google Sheets was updated
+        # Add lock protection around updates to tracker.member_status
+        self.member_status_lock = asyncio.Lock()
 
     def get_member_status(self):
         return f"{self.member_status}"
@@ -166,23 +191,26 @@ async def send_message(message, user_message, is_private):
             await message.channel.send(response)
         
     except Exception as e:
-        print("Exception error:", e)
+        print(f"Exception error:{print(traceback.format_exc())} {e}")
 
 
 def run_bot():
 
     bot.run(BOT_TOKEN)
+    
 
 
 @bot.event
 async def on_ready():
+    # Run the setup database coroutine
+    
     print(f'{bot.user} is now running worked')
 
 @bot.event
 async def on_message(message):
 
     global curauthor
-
+    attachmessg = ""
     if message.author == bot.user:
         return
     
@@ -191,7 +219,21 @@ async def on_message(message):
     channel = str(message.channel)
     curauthor = username
 
-    print(f"message {user_message} from {username} in channel {channel}. Author ID is {message.author.id} and channel id is {message.channel.id}")
+    # Check for attachments (e.g., uploaded images)
+    if message.attachments:
+        for attachment in message.attachments:
+            if any(attachment.filename.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+                print(f"Image or GIF detected: {attachment.url}")
+                attachmessg += attachment.url + " "
+
+    # Check for embeds (e.g., linked GIFs)
+    if message.embeds:
+        for embed in message.embeds:
+            if embed.url and any(embed.url.endswith(ext) for ext in ['.gif']):
+                print(f"GIF detected via embed: {embed.url}")
+                attachmessg += embed.url + " "
+
+    print(f"message {user_message} {attachmessg} from {username} in channel {channel}. Author ID is {message.author.id} and channel id is {message.channel.id}")
 
     # Check if the message is not empty before accessing the first character
     if user_message and user_message[0] == '*':
@@ -203,7 +245,7 @@ async def on_message(message):
         
         await send_message(message, user_message, is_private=False)
 
-    await bot.process_commands(message) # Makes sure the bot will process commands other than chat commands. 
+    await bot.process_commands(message) # Makes sure the bot will process commands other than chat commands.
 
 #   Representation of the VC logs
 #
@@ -224,40 +266,41 @@ async def on_voice_state_update(member, before, after):
     if tracker and tracker.tracked and tracker.checkchannel:
 
         # Exit early if already processing to prevent interference
-        if tracker.processing:
-            return
+        # if tracker.processing:
+        #     return
         
         # Update last_event_time for debounce handling
         tracker.last_event_time = time.time()
         await VCchekingtracker(member, before, after, current_time)
 
         print("in tracked check", tracker.tracked)
-
-        # Check if a user joined a voice channel
-        if before.channel is None and after.channel is not None and str(after.channel.name) == str(tracker.checkchannel):
-            print("joined channel")
-            # Add or update to the dictionary with join state (1)
-            tracker.member_status[member] = (1, (after, before))
-            # Start processing the buffer after a short delay
-
-        # Check if a user left a voice channel
-        elif before.channel is not None and after.channel is None and str(before.channel.name) == str(tracker.checkchannel):
-            print("left channel")
-            # Add or update to the dictionary with leave state (0)
-            tracker.member_status[member] = (0, (after, before))
-            # Start processing the buffer after a short delay
-
-        # Check if the user switched voice channels
-        elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id and (str(before.channel.name) == str(tracker.checkchannel) or str(after.channel.name) == str(tracker.checkchannel)):
-            # Consider the user both leaving the previous channel and joining the new one
-            print("switched channel")
-            if before.channel == tracker.checkchannel:
-                print("switched left")
-                tracker.member_status[member] = (0, (after, before))
-
-            elif after.channel == tracker.checkchannel:
-                print("sitched joined")
+        async with tracker.member_status_lock:
+            # Check if a user joined a voice channel
+            if before.channel is None and after.channel is not None and str(after.channel.name) == str(tracker.checkchannel):
+                print("joined channel")
+                # Add or update to the dictionary with join state (1)
                 tracker.member_status[member] = (1, (after, before))
+                # Start processing the buffer after a short delay
+
+            # Check if a user left a voice channel
+            elif before.channel is not None and after.channel is None and str(before.channel.name) == str(tracker.checkchannel):
+                print("left channel")
+                # Add or update to the dictionary with leave state (0)
+                
+                tracker.member_status[member] = (0, (after, before))
+                # Start processing the buffer after a short delay
+
+            # Check if the user switched voice channels
+            elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id and (str(before.channel.name) == str(tracker.checkchannel) or str(after.channel.name) == str(tracker.checkchannel)):
+                # Consider the user both leaving the previous channel and joining the new one
+                print("switched channel")
+                if before.channel == tracker.checkchannel:
+                    print("switched left")
+                    tracker.member_status[member] = (0, (after, before))
+
+                elif after.channel == tracker.checkchannel:
+                    print("sitched joined")
+                    tracker.member_status[member] = (1, (after, before))
         
         # trigger for processing events
         await debounce_process()  # Debounced trigger to process_joins_and_leaves
@@ -286,8 +329,9 @@ async def process_joins_and_leaves():
         while total_wait > 0:
             if tracker.member_status:  # Accumulate any new events that arrive during the wait
                 print("new event", tracker.member_status, "at", get_date_time())
-                to_process.update(tracker.member_status)
-                tracker.member_status.clear()
+                async with tracker.member_status_lock:
+                    to_process.update(tracker.member_status)
+                    tracker.member_status.clear()
             
             await asyncio.sleep(min(increment, total_wait))  # Wait for the smaller of increment or remaining wait time
             total_wait -= increment  # Reduce the remaining wait time
@@ -317,6 +361,11 @@ async def process_joins_and_leaves():
                 to_process.clear()
                 joined_members.clear()
                 leave_members.clear()
+                # Handle any new events that occurred during processing
+                async with tracker.member_status_lock:
+                    if tracker.member_status:
+                        print("New events queued during batch processing:", tracker.member_status)
+                        await process_joins_and_leaves()  # Process remaining events
                 tracker.pro_time = time.time() # capturing the time stamp of the last process update.
                 tracker.processing = False  # Mark processing as complete
                 print("Batch processing complete and member_status cleared.")
@@ -512,10 +561,15 @@ async def get_members_in_channel(channel, memname):
             # Extract keys (names) from the dictionary join_members
             members = set(memname.keys())
 
-            #print("members with fntion", members1)
-            print("members without fucntion", members)
+            print("seign the differneces", find_difference(members, tracker.trackedlist))
+            
+            # checks to see if members had tried to leave and join withing the batch period and are already in the tracked list.
+            if find_difference(members, tracker.trackedlist):
+                checked_members = find_difference(members, tracker.trackedlist)
+            else:
+                return # to not do anything beacuse the member/members are already on the sheet
 
-            tracker.trackedlist.update(member for member in members if member is not None) # ensures that None value gets added to the tracked list (None values are commonly bots that are in the channel)
+            tracker.trackedlist.update(member for member in checked_members if member is not None and member not in tracker.trackedlist) # ensures that None value gets added to the tracked list (None values are commonly bots that are in the channel)
             print("tracked list:::", tracker.trackedlist)
 
         await updatesheet(members, True, tracker.nick_track, memname)  # Send member IDs to the process function
@@ -729,6 +783,12 @@ def getdiffmembers(list1, list2):
     all_unique_names = unique_to_list1.union(unique_to_list2)
     return all_unique_names
 
+def find_difference(set1, set2):
+    # Find elements in set1 that are not in set2
+    difference = set1.difference(set2)
+    
+    # Return the difference if there are any, else return an empty set
+    return difference if difference else set()
 
 def is_tracker():
     async def predicate(ctx):
@@ -798,6 +858,17 @@ async def run_with_delay(func, delay):
     await asyncio.sleep(delay)  # Wait for the debounce delay
     await func()  # Call the target function
 
+def member_auth():
+    async def predicate(ctx):
+        # Convert the user ID to string for comparison
+        if str(ctx.author.id) in AUTH_TRACKERS:
+            return True
+        else:
+            # Send an error message and deny access
+            await ctx.send(f"Error: You are not authorized to use this command , {ctx.author.mention}.")
+            return False
+    return commands.check(predicate)
+
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -805,7 +876,7 @@ async def on_command_error(ctx, error):
     
     # Check if the error is CommandNotFound (unknown command)
     if isinstance(error, commands.CommandNotFound):
-        await ctx.send(f"Error: Unknown command. Use `!help` to see available commands.")
+        await ctx.send(f"Error: Unknown command. Use `%help` to see available commands.")
     
     # Handle missing required arguments
     elif isinstance(error, commands.MissingRequiredArgument):
@@ -832,6 +903,7 @@ def shutdown():
     print("Shutting down...")
     bot.close()
 
+
 @bot.command(name="flip")
 async def coinflip(ctx, guess: str):
     """Flips a coin and checks if the user's guess is correct."""
@@ -846,3 +918,805 @@ async def coinflip(ctx, guess: str):
         await ctx.send(f"🎉 You won! The coin landed on **{flip_result}**.")
     else:
         await ctx.send(f"😢 You lost. The coin landed on **{flip_result}**.")
+
+
+#creating Select options for sign up sheet
+# All roles needed :
+#       Tanks: Golem, HOJ, Soul Scyte, Heavy Mace, Grailseeker, 1h Arcane, 1h Mace, Incubus, Icicle
+#       Heals: Hallow Fall, Fallen
+#       Support: Bedrock, Locus, Occult, Great Arcane, Oathkeeper, Rootbound
+#       battlemount: Charriot, Basilisk, Eagle, Behemouth, Bastion, Balista, Ent
+#       DPS: Realmbreaker, Lifecurse, Damnation, Permafrost, Spiked, Rift Glave, Dawnsong, Carving, Hellfire, Spirithunter
+
+
+# Ensure the database and table are created
+async def setup_database():
+    async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+        await db.execute(f"""
+        CREATE TABLE IF NOT EXISTS signup_sheets (
+            sheet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            author TEXT NOT NULL,
+            content TEXT NOT NULL,
+            set_count TEXT NOT NULL,
+            start_time_utc TEXT NOT NULL,
+            location TEXT NOT NULL,
+            ss_img TEXT NOT NULL,
+            authnick TEXT NOT NULL
+        )
+        """)
+        await db.execute(f"""
+        CREATE TABLE IF NOT EXISTS signup_roles (
+            sheet_id INTEGER NOT NULL,
+            usernickname TEXT NOT NULL,
+            role1 TEXT DEFAULT NULL,
+            role2 TEXT DEFAULT NULL,
+            role3 TEXT DEFAULT NULL,
+            role4 TEXT DEFAULT NULL,
+            FOREIGN KEY(sheet_id) REFERENCES signup_sheets(sheet_id),
+            PRIMARY KEY (sheet_id, usernickname)
+        )
+        """)
+        await db.commit()
+
+def get_lock(sheet_id, usernickname):
+    """Retrieve a unique lock for a specific sheet and user."""
+    key = f"{sheet_id}:{usernickname}"
+    if key not in locks:
+        locks[key] = asyncio.Lock()
+    return locks[key]
+
+class SubroleDropdownView(discord.ui.View):
+    embed_messages = {}  # Class-level dictionary to track embed messages by sheet_id
+
+    def __init__(self, sheet_id: int, target_time_utc: str, member: str):
+        super().__init__()
+        self.sheet_id = sheet_id  # Store sheet_id
+        self.role_data = {
+            "Tank": ["Golem", "HOJ", "Soul Scythe", "Heavy Mace", "Grailseeker", "1h Arcane", "1h Mace", "Incubus", "Icicle", "Fill tank"],
+            "DPS": ["Realmbreaker", "Lifecurse", "Damnation", "Permafrost", "Spiked", "Rift Glave", "Dawnsong", "Carving", "Hellfire", "Spirithunter", "Fill DPS"],
+            "Healer": ["Hallow Fall", "Fallen", "Fill Healer"],
+            "Support": ["Bedrock", "Locus", "Occult", "Great Arcane", "Oathkeeper", "Rootbound", "Fill Support"],
+            "Battlemount": ["Chariot", "Basilisk", "Eagle", "Behemoth", "Bastion", "Ballista", "Ent", "Fill Battlemount"],
+        }
+        self.emot_list = {"Tank": "🛡️",
+                    "DPS":"⚔️",
+                    "Healer": "❤️‍🩹",
+                    "Support":"🦾",
+                    "Battlemount":"🏇"}
+        
+        self.role_type = ["Tank",
+                    "DPS",
+                    "Healer",
+                    "Support",
+                    "Battlemount"]
+
+        self.target_time = datetime.strptime(target_time_utc, "%H:%M").replace(
+            year=datetime.now(timezone.utc).year,
+            month=datetime.now(timezone.utc).month,
+            day=datetime.now(timezone.utc).day,
+            tzinfo=timezone.utc,
+        )
+        self.task = None
+        self.membernick = member
+        self.followup_message = None  # Initialize the followup_message attribute
+
+        if self.target_time <= datetime.now(timezone.utc):
+            self.target_time += timedelta(days=1)  # Move to next day if time has passed
+
+        for role_type, subroles in self.role_data.items():
+            options = [discord.SelectOption(label=subrole, value=subrole) for subrole in subroles]
+            # Add a category-specific 'None' option
+            options.append(
+                discord.SelectOption(
+                    label=f"None {role_type}",
+                    value=f"None {role_type}",
+                    description=f"No role for {role_type} category"
+                )
+            )
+            self.add_item(SubroleDropdown(sheet_id, role_type, self.role_data, options, placeholder=f"Select up to 2 {role_type} subroles"))
+
+    @classmethod
+    async def get_embed_message(cls, bot: discord.Client, sheet_id: int):
+        """Retrieve the stored embed message using its sheet_id."""
+        message_info = cls.embed_messages.get(sheet_id)
+        if not message_info:
+            return None  # Return None if the sheet_id is not in the dictionary
+        try:
+            channel = bot.get_channel(message_info["channel_id"]) or await bot.fetch_channel(message_info["channel_id"])
+            return await channel.fetch_message(message_info["message_id"])
+        except Exception as e:
+            print(f"Failed to fetch message for sheet_id {print(traceback.format_exc())} {sheet_id}: {e}")
+            return None
+    
+    @classmethod
+    def save_embed_message(cls, sheet_id: int, message: discord.Message):
+        """Save the embed message details using its sheet_id."""
+        cls.embed_messages[sheet_id] = {
+            "message_id": message.id,
+            "channel_id": message.channel.id,
+        }
+
+    def start_task(self):
+        """This method will start the timer task."""
+        self.task = asyncio.create_task(self.start_timer())
+        active_tasks[self.sheet_id] = self.task  # Add the task to the active_tasks dictionary
+
+    async def start_timer(self):
+        """Start the countdown timer and update the embed."""
+        while True:
+            now = datetime.now(timezone.utc)
+            time_left = (self.target_time - now).total_seconds()
+
+            if time_left > 0:
+                #await asyncio.sleep(1)
+                # update timer after 30sec
+                if int(time_left) % 30 == 0:
+                    embed_message = await self.get_embed_message(bot, self.sheet_id)
+                    if embed_message:
+                        await self.update_timer_only(bot)
+                sleep_time = min(30, time_left)  # Reduce unnecessary wakeups
+                await asyncio.sleep(sleep_time)
+            else:
+                if time_left <= 0:
+                    # When the time is up, stop the task and process the sheet
+                    await self.handle_time_up()
+                    break
+
+    async def send_or_edit_followup(self, interaction: discord.Interaction, content: str):
+        if self.followup_message:
+            try:
+                # Edit the existing follow-up message
+                await self.followup_message.edit(content=content)
+                
+            except discord.NotFound:
+                # If the message no longer exists, send a new one
+                self.followup_message = await interaction.followup.send(content=content, ephemeral=True,)
+        else:
+            # Send a new follow-up message
+            self.followup_message = await interaction.followup.send(content=content,ephemeral=True,)
+
+    def clone_embed(self, embed, time_str):
+        """Helper function to clone an embed and modify the footer with the time remaining."""
+        updated_embed = discord.Embed(
+            title=embed.title,
+            description=embed.description,
+            color=embed.color
+        )
+        if embed.fields:
+            for field in embed.fields:
+                updated_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+        if embed.author:
+            updated_embed.set_author(name=embed.author.name, icon_url=embed.author.icon_url)
+        if embed.footer:
+            updated_embed.set_footer(text=f"⏳ Time Remaining: `{time_str}`")
+        if embed.thumbnail:
+            updated_embed.set_thumbnail(url=embed.thumbnail.url)
+        if embed.image:
+            updated_embed.set_image(url=embed.image.url)
+        
+        return updated_embed
+    
+    async def handle_time_up(self):
+        """Handle actions when the timer reaches 0."""
+        try:
+            for child in self.children:
+                if isinstance(child, discord.ui.Select):
+                    child.disabled = True
+
+            embed_message = await self.get_embed_message(bot, self.sheet_id)
+            if embed_message:
+                await self.finalize_signup_sheet(bot)
+            
+            # Fetch data from the database
+            async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+                cursor = await db.execute("SELECT channel_id, author, content, set_count, start_time_utc, location, ss_img, authnick FROM signup_sheets WHERE sheet_id = ?", (self.sheet_id,))
+                row_info = await cursor.fetchone()
+
+            if str(row_info[1]) in sheets.SPREADSHEET_ID_dct:
+                # Fetch signup roles data from the database
+                async with aiosqlite.connect(os.getenv("DATABASE")) as db:
+                    cursor = await db.execute("SELECT usernickname, role1, role2, role3, role4 FROM signup_roles WHERE sheet_id = ?", (self.sheet_id,))
+                    signup_data = await cursor.fetchall()
+
+                # Write signup data to the Google Sheet
+                values = []
+                for row in signup_data:
+                    usernickname, *roles = row
+                    # Add a blank cell for the checkbox and the nickname and roles
+                    values.append([""] + [usernickname] + roles)
+                
+                # Update the Google Sheet
+                sheets.signup_sheet(str(row_info[1]), self.sheet_id, values)
+
+                # Clean up the database after updating the Google Sheet
+                async with aiosqlite.connect(os.getenv("DATABASE")) as db:
+                    await db.execute("DELETE FROM signup_roles WHERE sheet_id = ?", (self.sheet_id,))
+                    await db.execute("DELETE FROM signup_sheets WHERE sheet_id = ?", (self.sheet_id,))
+                    await db.commit()
+
+                print(f"Successfully processed signup sheet for sheet ID (Update Google Sheet): {self.sheet_id}")
+            else:
+                # Clean up the database after time is up (if no Google Sheet update is required)
+                async with aiosqlite.connect(os.getenv("DATABASE")) as db:
+                    await db.execute("DELETE FROM signup_roles WHERE sheet_id = ?", (self.sheet_id,))
+                    await db.execute("DELETE FROM signup_sheets WHERE sheet_id = ?", (self.sheet_id,))
+                    await db.commit()
+
+                print(f"Successfully processed signup sheet for sheet ID (No Google Sheet to update for {str(row_info[7])}): {self.sheet_id}")
+        except Exception as e:
+            print(f"❌ Error finalizing signup sheet {print(traceback.format_exc())} {self.sheet_id}: {e}")
+
+        finally:
+            # Remove the task from active_tasks and clean up
+            if self.sheet_id in active_tasks:
+                task = active_tasks.pop(self.sheet_id, None) # pops the active sheet id if it is actually in the dict
+                if task:
+                    task.cancel() # Cancel the running task
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        print(f"Task for sheet {self.sheet_id} cancelled successfully.")
+
+    async def finalize_signup_sheet(self, bot: discord.Client):
+        """
+        Finalizes the signup sheet by removing dropdowns and updating the embed 
+        to indicate the signup period has ended.
+        """
+        try:
+            # Get the current message containing the embed
+            message = await self.get_embed_message(bot, self.sheet_id)
+            if not message:
+                print(f"No embed message found for sheet_id: {self.sheet_id}")
+                return
+
+            # Retrieve the existing embed
+            embed = message.embeds[0] if message.embeds else None
+            if embed:
+                now = datetime.now(timezone.utc)
+                time_left = (self.target_time - now).total_seconds()
+                time_str = f"{int(time_left // 3600):02}:{int((time_left % 3600) // 60):02}:{int(time_left % 60):02}" if time_left > 0 else "Mass has started!"
+                # Clone and modify the embed
+                updated_embed = self.clone_embed(embed, time_str)
+                updated_embed.clear_fields()  # Remove fields (optional, if desired)
+                updated_embed.add_field(
+                    name="⏰ Signup Ended",
+                    value="The signup period has ended. Mass has started!",
+                    inline=False,
+                )
+                updated_embed.set_footer(text="📅 Thank you for signing up!")
+
+                # Lock editing to prevent race conditions
+                lock = get_lock(self.sheet_id, "edit")
+                async with lock:
+                    # Update the message without any view (removes dropdowns)
+                    await message.edit(embed=updated_embed, view=None)
+
+            print(f"Signup sheet finalized for sheet_id: {self.sheet_id}")
+        except discord.Forbidden:
+            print(f"Bot lacks permissions to edit message for sheet_id {self.sheet_id}.")
+        except discord.HTTPException as e:
+            print(f"HTTP exception occurred while editing message: {e}")
+        except Exception as e:
+            print(f"Unexpected error while finalizing signup sheet: {traceback.format_exc()}")
+
+    async def update_timer_only(self, bot: discord.Client):
+            """Update only the timer portion of the embed without affecting dropdowns."""
+            try:
+                print("in timer only")
+                message = await self.get_embed_message(bot, self.sheet_id)
+                if not message:
+                    print(f"in update timer No embed message found for sheet_id: {self.sheet_id}")
+                    return
+
+                embed = message.embeds[0] if message.embeds else None
+                print("see embed", embed)
+                if embed:
+                    now = datetime.now(timezone.utc)
+                    time_left = (self.target_time - now).total_seconds()
+                    time_str = f"{int(time_left // 3600):02}:{int((time_left % 3600) // 60):02}:{int(time_left % 60):02}" if time_left > 0 else "Mass has started!"
+
+                    # Clone and modify the embed using the helper function
+                    updated_embed = self.clone_embed(embed, time_str)
+
+                    # Lock editing to prevent race conditions
+                    lock = get_lock(self.sheet_id, "edit")
+                    async with lock:
+                        await message.edit(embed=updated_embed, view=self)
+                        
+                    #await message.edit(embed=updated_embed) # Update the embed without affecting dropdowns
+                    print(f"updated timer only")
+            except discord.Forbidden:
+                print(f"Bot lacks permissions to edit message for sheet_id  {print(traceback.format_exc())} {self.sheet_id}.")
+            except discord.HTTPException as e:
+                print(f"HTTP exception occurred while editing message:  {print(traceback.format_exc())} {e}")
+            except Exception as e:
+                print(f"Unexpected error updating timer: {print(traceback.format_exc())} {e}")
+
+    async def update_embed(self, bot: discord.Client, interaction):
+        """Update the entire embed with new data."""
+        
+        # if not message:
+        #     print(f"in update embeded No embed message found for sheet_id: {self.sheet_id}")
+        #     return
+        try:
+            message = await self.get_embed_message(bot, self.sheet_id)
+            if not message:
+                print(f"No embed message found for sheet_id check: {self.sheet_id}")
+
+            time_left = (self.target_time - datetime.now(timezone.utc)).total_seconds()
+            if time_left > 0:
+                """Update the embed message to reflect the current database state."""
+                async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+                    cursor = await db.execute("""
+                        SELECT usernickname, role1, role2, role3, role4
+                        FROM signup_roles
+                        WHERE sheet_id = ?
+                    """, (self.sheet_id,))
+                    rows = await cursor.fetchall()
+
+                # Group signups by main role category
+                role_signups = {role: [] for role in self.role_data.keys()}
+                
+                for row in rows:
+                    #print("the roles", row, rows)
+                    username = row[0]
+                    roles = [role for role in row[1::] if role]
+
+                    # sorts the roles with there main category
+                    sorted_roles = {key: [item for item in value if item in roles] for key, value in self.role_data.items()}
+
+                    # Adds the member name and sub roles for each main role/ category
+                    for category, subroles in sorted_roles.items():
+                        if subroles:
+                            role_signups[category].append(f"{username}: {subroles}")
+
+                # Calculate remaining time
+                now = datetime.now(timezone.utc)
+                time_left = (self.target_time - now).total_seconds()
+                time_str = f"{int(time_left // 3600):02}:{int((time_left % 3600) // 60):02}:{int(time_left % 60):02}" if time_left > 0 else "Mass has started!"
+
+                async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+                    cursor = await db.execute("""
+                        SELECT channel_id, author, content, set_count, start_time_utc, location, ss_img, authnick
+                        FROM signup_sheets
+                        WHERE sheet_id = ?
+                    """, (self.sheet_id,))
+                    row_info = await cursor.fetchall()
+                    rows_info = row_info[0]
+                
+                # Create the embed
+                embed = discord.Embed(
+                    title=(f"👑🍄 **Come and join** {str(rows_info[2])} with **{rows_info[7]}** 🍄👑"),
+                    description=(f"Massing from **`{str(rows_info[5])}`** ammount of sets **`1 + {str(rows_info[3])}`**\n"
+                                f"Startign Mass at **`{rows_info[4]}`** Current time UTC: **`{now}`**\n"
+                                "Select subroles for each category below:\n"
+                                "You can select up to **2 subroles** for each category. "
+                                "Maximum of **4 subroles total** across all categories."
+                    ),
+                    color=discord.Color.green(),
+                )
+                
+                embed.set_thumbnail(url="https://media.discordapp.net/attachments/1044669830411862146/1304975286483292211/luigi_gang_shit.png?format=webp&quality=lossless")
+                # Add the role columns and names with sub roles to the embeded message
+                
+                for column_title, members_list in process_roles_signup(role_signups, self.emot_list).items():
+                    embed.add_field(
+                        name=column_title,
+                        value=members_list if members_list else "No signups yet.",
+                        inline=True,
+                    )
+
+                # Add total signups and footer
+                if rows_info[6] and rows_info[6].startswith("http"):
+                    embed.set_image(url=rows_info[6])
+
+                total_signups = len(set(row[0] for row in rows))
+                embed.add_field(name="Total Signups", value=str(total_signups), inline=False)
+                embed.set_footer(text=f"⏳ Time Remaining: `{time_str}`")
+
+                if not message:
+                    # Send a new embed if no existing message
+                    if interaction.response.is_done():
+                        sent_message = await interaction.followup.send(embed=embed, view=self)
+                    else:
+                        await interaction.response.send_message(embed=embed, view=self)
+                        sent_message = await interaction.original_response()
+                    # Save the new message in storage
+                    self.save_embed_message(self.sheet_id, sent_message)
+                else:
+                    # Edit the existing message
+                    # Lock editing to prevent race conditions
+                    lock = get_lock(self.sheet_id, "edit")
+                    async with lock:
+                        await message.edit(embed=embed, view=self)
+        except Exception as e:
+            print(f"❌ Failed to update embed: {print(traceback.format_exc())} {e}")
+
+def generate_role_message(updated_roles: list,role_data: dict,max_roles: int) -> str:
+    #Generates a feedback message about the remaining roles and category breakdown.
+    # Count remaining roles
+    remaining_roles = max_roles - len([role for role in updated_roles if role and "None" not in role])
+    # Breakdown by category
+    role_breakdown = {category: 0 for category in role_data.keys()}
+    for role in updated_roles:
+        if role and "None" not in role:
+            for category, subroles in role_data.items():
+                if role in subroles:
+                    role_breakdown[category] += 1
+    # Create detailed feedback message
+    breakdown_message = "\n".join(
+        [f"**{category} roles:** {count}" for category, count in role_breakdown.items()]
+    )
+    role_list =str(updated_roles).replace("[", "").replace("]", "").replace("'", "")
+    feedback_message = f"\n\nYou have **{remaining_roles} roles remaining** to choose. \n Roles selected are: `{role_list}` \n\n{breakdown_message}"
+    return feedback_message
+
+class SubroleDropdown(discord.ui.Select):
+
+    def __init__(self, sheet_id: int, role_type: str, role_data:dict, options: list, placeholder: str):
+        super().__init__(placeholder=placeholder, min_values=1, max_values=2, options=options)
+        self.sheet_id = sheet_id
+        self.role_type = role_type
+        self.role_data = role_data
+        
+    """If you defer an interaction, you must ensure that no additional calls to
+    interaction.response.send_message or similar methods are made directly. Instead, use
+    interaction.followup.send() for subsequent messages."""
+    
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer()  # Acknowledge the interaction without sending a response
+            selected_options = self.values
+            member = interaction.user
+            max_roles_per_category = 2
+            max_roles = 4
+
+            #print("see hte values selected", selected_options, member)
+            lock = get_lock(self.sheet_id, member.nick)
+            async with lock:  # Prevent concurrent updates for the same user
+                async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+                    # Fetch existing roles for the user
+                    cursor = await db.execute(""" SELECT role1, role2, role3, role4 FROM signup_roles WHERE sheet_id = ? AND usernickname = ? """,(self.sheet_id, member.nick))
+                    row = await cursor.fetchone()
+                    #print("see wht ahte db has", row)
+                    
+                    # If no existing record, initialize with None
+                    if not row:
+                        # Insert a new row for the user if not exists
+                        row = [None] * 4  # Columns for roles
+                        await db.execute(f"""
+                        INSERT INTO signup_roles (sheet_id, usernickname, role1, role2, role3, role4)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, (self.sheet_id, member.nick, *row))
+                        await db.commit()
+
+                    cursor = await db.execute("""
+                        SELECT channel_id, author, content, set_count, start_time_utc, location, ss_img, authnick FROM signup_sheets WHERE sheet_id = ?
+                    """, (self.sheet_id,))
+                    sheet_info = await cursor.fetchall()
+
+                    # Combine current roles and new selections, removing duplicates
+                    # Filter out empty values (None) but keep the string 'None' explicitly
+                    current_roles =  [role for role in row if role is not None]
+
+                    # Handle category-specific 'None' selection finds and remove all roles if "None {category} was selected as an option"
+                    category_none_value = f"None {self.role_type}"
+                    if category_none_value in selected_options:
+                        # Remove all roles for this category
+                        updated_roles = [role if role not in self.role_data[self.role_type] else category_none_value for role in current_roles]
+                        updated_roles += [None] * (max_roles - len(updated_roles))
+                        message = f"You deselected all subroles for **{self.role_type}** from **`{sheet_info[0][7]}`** signup sheet."
+                    else:
+                        # Check if user exceeds max subroles
+                        category_roles = [role for role in current_roles if role in self.role_data[self.role_type]]
+                        selected_roles_count = len([role for role in selected_options if role not in category_roles])
+                        if len(category_roles) + selected_roles_count > max_roles_per_category:
+                            # User is exceeding the max subroles for this category
+                            message = (f"You cannot select more than {max_roles_per_category} subroles for **{self.role_type}** "
+                                    f"from **`{sheet_info[0][7]}`** signup sheet.\n"
+                                    "To change your roles, deselect existing subroles for this category first.")
+                            message += generate_role_message(current_roles, self.role_data, max_roles)
+                            if isinstance(self.view, SubroleDropdownView):
+                                await self.view.send_or_edit_followup(interaction, message)
+                            return
+                        # Check if user exceeds total roles across all categories
+                        non_empty_roles = [role for role in current_roles if role and "None" not in role]
+
+                        if len(non_empty_roles) + selected_roles_count > max_roles:
+                            # User is exceeding the total max subroles across all categories
+                            
+                            message = (f"You cannot select more than {max_roles} subroles across all categories "
+                                        f"from **`{sheet_info[0][7]}`** signup sheet.\n"
+                                        "To change your roles, deselect existing subroles in other categories.")
+                            message += generate_role_message(current_roles, self.role_data, max_roles)
+                            if isinstance(self.view, SubroleDropdownView):
+                                await self.view.send_or_edit_followup(interaction, message)
+                            return
+                    
+                        # Update roles for this category
+                        updated_roles = [role for role in current_roles if role not in self.role_data[self.role_type]]
+                        updated_roles += [role for role in selected_options if role is not None]
+                        updated_roles =[role for role in updated_roles if "None" not in role]
+                        updated_roles = updated_roles[:max_roles]  # Enforce total role limit
+                        updated_roles += [None] * (max_roles - len(updated_roles))
+                        message = f"Your selections for **{self.role_type}** have been updated from **`{sheet_info[0][7]}`** signup sheet."
+
+                    # Save updated roles
+                    # Update database
+                    await db.execute(f"""
+                    UPDATE signup_roles
+                    SET role1 = ?, role2 = ?, role3 = ?, role4 = ?
+                    WHERE sheet_id = ? AND usernickname = ?
+                    """, (*updated_roles, self.sheet_id, member.nick))
+                    await db.commit()
+                    # Append role details and total roles to the message
+                    message += generate_role_message(updated_roles, self.role_data, max_roles)
+            # Add a delay before refreshing the embed
+            await asyncio.sleep(3)  # Give the user time to view the options
+
+            # Update the embed with new data
+            if isinstance(self.view, SubroleDropdownView):
+                await self.view.update_embed(bot, interaction)
+                await self.view.send_or_edit_followup(interaction, message)
+            #await interaction.followup.send(content=message,ephemeral=True,)
+
+        except Exception as e:
+            print(f"Error in SubroleDropdown callback: {print(traceback.format_exc())} {e}")
+            await interaction.followup.send(
+                content="An error occurred while processing your selection. Please try again.",
+                ephemeral=True,
+            )
+        #await print_all_members_with_roles()
+
+def member_auth():
+    async def predicate(ctx):
+        # Convert the user ID to string for comparison
+        if str(ctx.author.id) in AUTH_TRACKERS:
+            return True
+        else:
+            # Send an error message and deny access
+            await ctx.send(f"Error: You are not authorized to use this command , {ctx.author.mention}.")
+            return False
+    return commands.check(predicate)
+
+# Command to send the dropdown menu
+@bot.command(name='menu')
+@member_auth()
+async def signup(ctx):
+    
+    # Stores the questions that the bot will ask the user to answer in the channel that the command was made
+    # Stores the answers for those questions in a different list
+    signup_questions = ['Which channel will the signup sheet placed?', 'What is the content that is to be held?', 'How many sets are required? (e.g "2" meaning 1 + 2 sets)',
+                         'Where is the mass location? ',f'What time in UTC will the mass start? (HH:MM) Current UTC time is `{get_date_time()}`', 
+                         'Is there an image you would like to display for your sign up sheet? Valid files are "[.png, .jpg, .jpeg, .gif]" ']
+    signup_answers = []
+    messages_to_delete = []  # Track messages to delete
+
+    # Checking to be sure the author is the one who answered and in which channel
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+    
+    # Askes the questions from the signup_questions list 1 by 1
+    # Times out if the host doesn't answer within 30 seconds
+    for question in signup_questions:
+        sent_message = await ctx.send(question)
+        messages_to_delete.append(sent_message)  # Track bot's question message
+
+        try:
+            message = await bot.wait_for('message', timeout= 30.0, check= check)
+        except asyncio.TimeoutError:
+            timeout_message =  await ctx.send('You didn\'t answer in time. Please try again and be sure to send your answer within 30 seconds of the question.')
+            messages_to_delete.append(timeout_message)
+            await asyncio.sleep(5)  # Give some time for the user to see the message
+            await ctx.channel.delete_messages(messages_to_delete)  # Bulk delete messages
+            return
+        else:
+            if question == 'Is there an image you would like to display for your sign up sheet? Valid files are "[.png, .jpg, .jpeg, .gif]" ':
+                if message.content in ['No', 'N', 'n', 'no']:
+                    signup_answers.append("No")
+                    signup_answers.append("N")
+                    messages_to_delete.append(message)
+                else:
+                    signup_answers.append(message.attachments)
+                    signup_answers.append(message.embeds)
+                    messages_to_delete.append(message)
+            else:
+                signup_answers.append(message.content)
+                messages_to_delete.append(message)
+
+    # Grabbing the channel id from the signup_questions list and formatting is properly
+    # Displays an exception message if the host fails to mention the channel correctly
+    try:
+        c_id = int(signup_answers[0][2:-1])
+        
+        if not bot.get_channel(c_id):
+            raise ValueError("Invalid channel ID")
+    except:
+        error_message =await ctx.send(f'You failed to mention the channel correctly. Please do it like this: {ctx.channel.mention} using the "#" identifier and select the channel.')
+        messages_to_delete.append(error_message)  # Track error message
+        await asyncio.sleep(5)  # Allow user to see the message
+        await ctx.channel.delete_messages(messages_to_delete)
+        return
+    
+    try:
+        # Validate and parse the target time
+        datetime.strptime(signup_answers[4], "%H:%M")
+    except ValueError:
+        error_message = await ctx.send("Invalid time format! Please provide the time in HH:MM (UTC).")
+        messages_to_delete.append(error_message)
+        await asyncio.sleep(5)
+        await ctx.channel.delete_messages(messages_to_delete)
+
+    attachmessg = None
+
+    # Check for attachments (e.g., uploaded images)
+    if signup_answers[5] != "No":
+        if signup_answers[5]:  # Check for attachments
+            for attachment in signup_answers[5]:
+                if isinstance(attachment, discord.Attachment):  # Ensure it's an attachment
+                    if any(attachment.filename.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+                        print(f"Image or GIF detected: {attachment.url}")
+                        attachmessg = attachment.url
+                        break
+
+        elif signup_answers[6]:  # Check for embeds
+            for embed in signup_answers[6]:
+                if isinstance(embed, discord.Embed) and embed.image:
+                    if embed.image.url and any(embed.image.url.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+                        print(f"Image detected via embed: {embed.image.url}")
+                        attachmessg = embed.image.url
+                        break
+        else:
+            error_message = await ctx.send(
+                "Invalid file format! Please provide an image, GIF, or link to one, or type 'No' if you don't want to include an image."
+            )
+            messages_to_delete.append(error_message)
+            await asyncio.sleep(5)
+            await ctx.channel.delete_messages(messages_to_delete)
+            return
+    else:
+        attachmessg = "No"
+
+    if not str(signup_answers[2]).isnumeric():
+        error_message = await ctx.send("Invalid answer given for the amount of sets that are required, this answer must be a numeric value. (e.g '2' meaning 1 + 2 sets) ")
+        messages_to_delete.append(error_message)
+        await asyncio.sleep(5)
+        await ctx.channel.delete_messages(messages_to_delete)
+        return
+
+    async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+        await db.execute("""
+            INSERT INTO signup_sheets (channel_id, author, content, set_count, start_time_utc, location, ss_img, authnick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (c_id, str(message.author.id), str(signup_answers[1]), str(signup_answers[2]), str(signup_answers[4]), str(signup_answers[3]), str(attachmessg), str(message.author.nick),))
+        await db.commit()
+
+        # Fetch the sheet_id of the newly created signup sheet
+        cursor = await db.execute("SELECT last_insert_rowid()")
+        sheet_id = (await cursor.fetchone())[0]
+    
+    # Calculate time left
+    now = datetime.now(timezone.utc)
+    target_time = datetime.strptime(signup_answers[4], "%H:%M").replace( year=now.year, month=now.month, day=now.day, tzinfo=timezone.utc)
+    time_left = (target_time - now).total_seconds()
+    time_str = f"{int(time_left // 3600):02}:{int((time_left % 3600) // 60):02}:{int(time_left % 60):02}" if time_left > 0 else "Mass has started!"
+
+    channel = bot.get_channel(c_id)
+
+    if channel and sheet_id:
+        embed = discord.Embed(
+            title=f"👑🍄 **Come and join** {str(signup_answers[1])} with {message.author.nick} 🍄👑",
+            description=(f"Massing from **`{str(signup_answers[3])}`** ammount of sets **`1 + {str(signup_answers[2])}`**\n"
+                         f"Startign Mass at **`{signup_answers[4]}`** Current time UTC: **`{now}`**\n"
+                "Select subroles for each category below:\n"
+                "You can select up to **2 subroles** for each category. "
+                "Maximum of **4 subroles total** across all categories."
+                "🛡️ **Tank**\n"
+                "⚔️ **DPS**\n"
+                "❤️‍🩹 **Healer**\n"
+                "🦾 **Support**\n"
+                "🏇 **Battlemount**\n\n"
+            ),
+            color=discord.Color.green(),
+        )
+        
+        embed.set_thumbnail(url="https://media.discordapp.net/attachments/1044669830411862146/1304975286483292211/luigi_gang_shit.png?format=webp&quality=lossless")
+        if attachmessg and attachmessg.startswith("http"):
+            embed.set_image(url=attachmessg)
+
+        embed.set_footer( text=f"⏳ Time Remaining `{time_str}`")
+        view = SubroleDropdownView(sheet_id, str(signup_answers[4]), message.author.nick)
+        message = await channel.send(embed=embed, view=view)
+        view.embed_message = message
+        confirmation_message= await ctx.send(f"Sign up sheet made with ID: #{sheet_id} and sent to {channel}!!! 🥱👍")
+        messages_to_delete.append(confirmation_message)  # Track confirmation message
+        await asyncio.sleep(5)  # Allow some time for the user to see confirmation
+        await ctx.channel.delete_messages(messages_to_delete)  # Bulk delete messages
+        view.start_task()
+
+@bot.command()
+async def list_sheets(ctx):
+    async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+        cursor = await db.execute("SELECT sheet_id, channel_id, author, content, set_count, start_time_utc, location, ss_img, authnick FROM signup_sheets")
+        rows = await cursor.fetchall()
+
+    if rows:
+        embed = discord.Embed(
+            title="📜 Active Signup Sheets",
+            color=discord.Color.blue()
+        )
+        for row in rows:
+            print("row", row)
+            sheet_id, channel_id, author, content, set_count, start_time, location, ss_img, authnick = row
+            embed.add_field(
+                name=f"Sheet #{sheet_id}",
+                value=f"**Content:** {content}\n**Start Time (UTC):** {start_time} \n **Author:** {authnick}",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("No active signup sheets.")
+
+
+@bot.command()
+async def cancel_sheet(ctx, sheet_id: int):
+    #Cancel a specific signup sheet and remove its data from the database.
+
+    async with aiosqlite.connect(os.getenv('DATABASE')) as db:
+        # Check if the sheet exists
+        cursor = await db.execute("SELECT * FROM signup_sheets WHERE sheet_id = ?", (sheet_id,))
+        sheet = await cursor.fetchone()
+
+        if not sheet:
+            await ctx.send(f"❌ No signup sheet found with ID #{sheet_id}.")
+            return
+
+        # Delete associated roles
+        await db.execute("DELETE FROM signup_roles WHERE sheet_id = ?", (sheet_id,))
+        # Delete the signup sheet itself
+        await db.execute("DELETE FROM signup_sheets WHERE sheet_id = ?", (sheet_id,))
+        await db.commit()
+        # Clear any cached data for the sheet
+        if sheet_id in active_tasks:
+            task = active_tasks.pop(sheet_id)  # Get the task and remove it from the active tasks dictionary
+            task.cancel()  # Cancel the running task
+        
+    await ctx.send(f"✅ Signup sheet #{sheet_id} and all its associated data have been successfully canceled.")
+
+# Function to break the members into smaller chunks of columns
+def process_roles_signup(role_dict, emoji_map):
+    max_length=1024
+    processed_roles = {}
+
+    for role_type, members in role_dict.items():
+        emoji = emoji_map.get(role_type, '')
+        part_counter = 1
+        current_key = f"{emoji} {role_type}"
+        current_part = []
+        current_length = 0
+
+
+        for member_str in members:
+            # Clean the member string
+            member_str = member_str.replace("[", "").replace("]", "").replace("'", "")
+            member_length = len(member_str)
+
+            # If adding this member exceeds the limit, save the current part and start a new one
+            if current_length + member_length + 1 > max_length:  # +1 for newline
+                processed_roles[current_key] = current_part
+                # Start a new column (e.g., Tank Pt 2)
+                part_counter += 1
+                current_key = f"{emoji} {role_type} Pt {part_counter}"
+                current_part = []
+                current_length = 0
+
+            # Add the member to the current part
+            current_part.append(member_str)
+            current_length += member_length + 1
+
+        # Add any remaining part
+        if current_part:
+            processed_roles[current_key] = "\n".join(current_part)
+    return processed_roles
+
