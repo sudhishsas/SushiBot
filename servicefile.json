@@ -1,13 +1,1 @@
-{
-  "type": "service_account",
-  "project_id": "sushibot-project",
-  "private_key_id": "9795e68e5af5ef219dec0a8a114002363a7674c0",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC8CtER8OgJoLG4\n7x1Agm591ywJEKrT5tNyQ3wX8T4n4we7SY1ScNEC9kgTX65R2jlAafDDoZzw/gAb\nAOIpEqgsT8Y9uPAcSGS486esvFpHybETxGd2B7GYP2SgSKrAsaBhifae9OmeBxIy\nLqN0DvnblC4KVLRg9fj8uvE7tTNxOf7OpxfRT/t5iO3FmzpfqWtijwonUxb5MXyj\nc9Y3hzJlWXRIGD4DdcrqyAywtKhykMFHCnfTKtCd4eu0RC3kcDULUYgvtsSTxN63\nWeefaM70ZQ7f+fqb4rPMYhAoCBpHne0XmBPczPnN2b6eESj29Kd1rsUiVJddE+Hb\nUwIOPDlPAgMBAAECggEACtme7aeWY/PTPWYCrJW6FWXEgzNkf/yaJ8YwE1uWqAuI\nByz7zA15ae/XAdMsBkoOsqJKQ6eAHEGztNsssY0DiicCO85/gEpHEYrxmlx14x2G\nq6rSA3P3Md86iasXuy2koOwqgEqGbllfGekqAkjY7uwSagMwM0YOG1sYD0dp0/cY\n2UzTbhMI9SSM1qfk63JqtVBc6tPG1PuG3vNrFch234uLIW+8VoiVkbwXdSQZSZcg\nm5TuKEemTNQHOBcqYpJb39kAuclcQzELvzi44CY4HNuNi435/PZvEFRb6HR7Medn\nO5DMd1fiQnpIVfYE7k/RevZlLKuQ3NlfXE7UAA2FbQKBgQDonyYajDD948RI1ujw\n18ZqS2CXpxJBnHVwP007Iw0M0CzDX276NYA7hJkftBjA7t03NhwsfO3m3B3+eQtQ\nTmQxrR1j5PIc8z61BAH0WgXc6fw/J51Csae/+TJTl19KTAd90KjadtpFYoYQPT5/\nAYtIDxQ/91pTkyBsutPWwsCIAwKBgQDO8LxpoJ4GEbBWDN+9x26wRwFYQVCYp0eV\ney6xeXIDMQVhZh1ZLcp/TJ3NUnroCxG6SWwYR0GC24CQYCAW+lvd2Wwff/BrEVJp\ndDeeLvAt+2cxeAOF/ebepsgkfn1xE/PH7gLSFNsjjg2XrtIhL67G9bEWlCn9Wte4\nk2a+Pc6FxQKBgEn7S5gH3BDzHlr4Fo96YH0vyeGRXgoF44e2ai6ToDPiBUqBkH79\nAvJq4nQlx/WcQjir+dvgQ503hkaHYqTAubbe0skRaDry1Y+mXaTD+LdgpzvCso4i\niDJS48GYE9NCSOOnt/v67sJAaljB0Z189ToOqacKWOzZjudlp7fWqnrXAoGAfpA5\ni5iSTT/wSxCgnp8kkWc76VA5DMPyQfgOvLh8BHuswL8FYA9jc6vWL0csqFJsyzQw\nikC6TmAVJzfDKIqCORLK0BEdZz422wwbIAGxH05M9LJj5UU+OBpk+fzql4gOZs6o\npvfedsZghc6D8YwKJuEJJ7gCXlN68AYmpl+CuckCgYEAo8kxAJFguPCQdRs6ErIh\nooji8k28rpvpAvZq4Q2z9dTDU+jN68UEr6YBL1qpwl7Ac8nLKsT+nMdW/u+3Tax+\n0Cui/JkhgpjQjdrRtIL/LmplJRjlS7mZaZO7J6NAYj4GNVtVnjyICATgXJbcjCFa\n1N/zA8Xc3pm/GGnZ9eUOZN0=\n-----END PRIVATE KEY-----\n",
-  "client_email": "sushbotservice@sushibot-project.iam.gserviceaccount.com",
-  "client_id": "117058305248236731221",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/sushbotservice%40sushibot-project.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-}
+
